@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>고성능 부드러운 스크롤</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            background: #1a1a1a;
+        }
+
+        .scroll-container {
+            position: relative;
+            height: 100vh;
+            overflow: hidden;
+            contain: layout style paint;
+        }
+
+        .scroll-content {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            will-change: transform;
+            transform: translateZ(0);
+            contain: layout style paint;
+        }
+
+        .item {
+            height: 100px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 2rem;
+            border-bottom: 1px solid #333;
+            color: white;
+            transition: background-color 0.2s ease;
+            contain: layout style paint;
+        }
+
+        .item:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
+        .item:nth-child(odd) {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .item-content {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .item-avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+        }
+
+        .item-text {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .item-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .item-subtitle {
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+
+        .item-time {
+            font-size: 0.8rem;
+            opacity: 0.5;
+        }
+
+        .scroll-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        .performance-info {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 10px;
+            font-size: 0.8rem;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+            font-family: monospace;
+        }
+
+        @media (max-width: 768px) {
+            .item {
+                height: 80px;
+                padding: 0 1rem;
+            }
+            .item-avatar {
+                width: 40px;
+                height: 40px;
+            }
+            .performance-info,
+            .scroll-indicator {
+                font-size: 0.7rem;
+                padding: 0.4rem 0.8rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="scroll-container" id="scrollContainer">
+        <div class="scroll-content" id="scrollContent"></div>
+    </div>
+
+    <div class="scroll-indicator" id="scrollIndicator">
+        스크롤: 0 / 0
+    </div>
+
+    <div class="performance-info" id="performanceInfo">
+        FPS: 60 | 렌더링된 아이템: 0 / 0
+    </div>
+
+    <script>
+        class VirtualizedSmoothScroll {
+            constructor(container, options = {}) {
+                this.container = container;
+                this.content = container.querySelector('#scrollContent');
+                
+                // 스크롤 관련
+                this.scrollY = 0;
+                this.targetY = 0;
+                this.velocity = 0;
+                this.friction = 0.92;
+                this.ease = 0.08;
+                
+                // 가상화 관련
+                this.itemHeight = options.itemHeight || 100;
+                this.totalItems = options.totalItems || 10000; // 큰 데이터 시뮬레이션
+                this.visibleItemsCount = Math.ceil(window.innerHeight / this.itemHeight) + 2; // 버퍼 포함
+                this.startIndex = 0;
+                this.endIndex = this.visibleItemsCount;
+                
+                // 성능 모니터링
+                this.frameCount = 0;
+                this.lastTime = 0;
+                this.fps = 60;
+                this.lastFpsUpdate = 0;
+                
+                // 터치 관련
+                this.touchStartY = 0;
+                this.touchVelocity = 0;
+                this.lastTouchY = 0;
+                this.lastTouchTime = 0;
+                
+                // 스크롤 범위
+                this.maxScroll = (this.totalItems * this.itemHeight) - window.innerHeight;
+                
+                // 렌더링된 아이템 캐시
+                this.renderedItems = new Map();
+                this.itemPool = [];
+                
+                this.init();
+            }
+
+            init() {
+                this.setupContent();
+                this.bindEvents();
+                this.render();
+                
+                window.addEventListener('resize', () => {
+                    this.handleResize();
+                });
+            }
+
+            setupContent() {
+                // 초기 아이템들 생성
+                for (let i = 0; i < this.visibleItemsCount; i++) {
+                    this.createItem(i);
+                }
+                this.updateContentHeight();
+            }
+
+            createItem(index) {
+                if (index >= this.totalItems) return null;
+                
+                const item = document.createElement('div');
+                item.className = 'item';
+                item.style.position = 'absolute';
+                item.style.top = `${index * this.itemHeight}px`;
+                item.style.width = '100%';
+                item.style.height = `${this.itemHeight}px`;
+                
+                const colors = ['#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a', '#a8edea'];
+                const color = colors[index % colors.length];
+                
+                item.innerHTML = `
+                    <div class="item-content">
+                        <div class="item-avatar" style="background: linear-gradient(45deg, ${color}, ${color}88)">
+                            ${String.fromCharCode(65 + (index % 26))}
+                        </div>
+                        <div class="item-text">
+                            <div class="item-title">아이템 #${index + 1}</div>
+                            <div class="item-subtitle">대용량 데이터 리스트 - 가상화 적용</div>
+                        </div>
+                    </div>
+                    <div class="item-time">${new Date(Date.now() - Math.random() * 86400000).toLocaleTimeString()}</div>
+                `;
+                
+                this.content.appendChild(item);
+                this.renderedItems.set(index, item);
+                return item;
+            }
+
+            updateContentHeight() {
+                this.content.style.height = `${this.totalItems * this.itemHeight}px`;
+            }
+
+            handleResize() {
+                this.visibleItemsCount = Math.ceil(window.innerHeight / this.itemHeight) + 2;
+                this.maxScroll = (this.totalItems * this.itemHeight) - window.innerHeight;
+                this.updateVisibleItems();
+            }
+
+            updateVisibleItems() {
+                const scrollTop = this.scrollY;
+                const newStartIndex = Math.max(0, Math.floor(scrollTop / this.itemHeight) - 1);
+                const newEndIndex = Math.min(this.totalItems, newStartIndex + this.visibleItemsCount);
+                
+                if (newStartIndex === this.startIndex && newEndIndex === this.endIndex) {
+                    return; // 변화 없음
+                }
+                
+                // 더 이상 보이지 않는 아이템들 제거
+                for (let i = this.startIndex; i < this.endIndex; i++) {
+                    if (i < newStartIndex || i >= newEndIndex) {
+                        const item = this.renderedItems.get(i);
+                        if (item) {
+                            this.content.removeChild(item);
+                            this.renderedItems.delete(i);
+                            this.itemPool.push(item); // 재사용을 위해 풀에 추가
+                        }
+                    }
+                }
+                
+                // 새로 보이는 아이템들 추가
+                for (let i = newStartIndex; i < newEndIndex; i++) {
+                    if (!this.renderedItems.has(i)) {
+                        this.createItem(i);
+                    }
+                }
+                
+                this.startIndex = newStartIndex;
+                this.endIndex = newEndIndex;
+            }
+
+            bindEvents() {
+                // 마우스 휠
+                this.container.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    this.handleWheel(e);
+                }, { passive: false });
+
+                // 터치 이벤트
+                this.container.addEventListener('touchstart', (e) => {
+                    this.handleTouchStart(e);
+                }, { passive: true });
+
+                this.container.addEventListener('touchmove', (e) => {
+                    e.preventDefault();
+                    this.handleTouchMove(e);
+                }, { passive: false });
+
+                this.container.addEventListener('touchend', (e) => {
+                    this.handleTouchEnd(e);
+                }, { passive: true });
+
+                // 키보드
+                document.addEventListener('keydown', (e) => {
+                    this.handleKeydown(e);
+                });
+            }
+
+            handleWheel(e) {
+                const delta = e.deltaY * 0.8;
+                this.targetY += delta;
+                this.targetY = Math.max(0, Math.min(this.targetY, this.maxScroll));
+                this.velocity += delta * 0.2;
+            }
+
+            handleTouchStart(e) {
+                this.touchStartY = e.touches[0].clientY;
+                this.lastTouchY = this.touchStartY;
+                this.lastTouchTime = Date.now();
+                this.touchVelocity = 0;
+                this.velocity = 0;
+            }
+
+            handleTouchMove(e) {
+                const currentY = e.touches[0].clientY;
+                const deltaY = this.lastTouchY - currentY;
+                const currentTime = Date.now();
+                const deltaTime = currentTime - this.lastTouchTime;
+
+                if (deltaTime > 0) {
+                    this.touchVelocity = deltaY / deltaTime * 16;
+                }
+
+                this.targetY += deltaY;
+                this.targetY = Math.max(0, Math.min(this.targetY, this.maxScroll));
+
+                this.lastTouchY = currentY;
+                this.lastTouchTime = currentTime;
+            }
+
+            handleTouchEnd(e) {
+                this.velocity = this.touchVelocity * 8;
+            }
+
+            handleKeydown(e) {
+                const keyMap = {
+                    ArrowDown: 200,
+                    ArrowUp: -200,
+                    PageDown: window.innerHeight * 0.8,
+                    PageUp: -window.innerHeight * 0.8,
+                    Home: -this.targetY,
+                    End: this.maxScroll - this.targetY
+                };
+
+                if (keyMap[e.key] !== undefined) {
+                    e.preventDefault();
+                    this.targetY += keyMap[e.key];
+                    this.targetY = Math.max(0, Math.min(this.targetY, this.maxScroll));
+                    this.velocity = keyMap[e.key] * 0.15;
+                }
+            }
+
+            updateIndicators() {
+                const scrollIndicator = document.getElementById('scrollIndicator');
+                const performanceInfo = document.getElementById('performanceInfo');
+                
+                const scrollPercent = Math.round((this.scrollY / this.maxScroll) * 100) || 0;
+                scrollIndicator.textContent = `스크롤: ${scrollPercent}% | 아이템: ${Math.floor(this.scrollY / this.itemHeight) + 1} / ${this.totalItems}`;
+                
+                const visibleItems = this.endIndex - this.startIndex;
+                performanceInfo.textContent = `FPS: ${this.fps} | 렌더링된 아이템: ${visibleItems} / ${this.totalItems}`;
+            }
+
+            calculateFPS() {
+                this.frameCount++;
+                const currentTime = performance.now();
+                
+                if (currentTime - this.lastFpsUpdate >= 1000) {
+                    this.fps = Math.round(this.frameCount);
+                    this.frameCount = 0;
+                    this.lastFpsUpdate = currentTime;
+                }
+            }
+
+            render() {
+                const currentTime = performance.now();
+                
+                // 관성 적용
+                if (Math.abs(this.velocity) > 0.1) {
+                    this.targetY += this.velocity;
+                    this.velocity *= this.friction;
+                    this.targetY = Math.max(0, Math.min(this.targetY, this.maxScroll));
+                }
+
+                // 부드러운 이징
+                const diff = this.targetY - this.scrollY;
+                if (Math.abs(diff) > 0.1) {
+                    this.scrollY += diff * this.ease;
+                } else {
+                    this.scrollY = this.targetY;
+                }
+
+                // 가상화 업데이트 (프레임 스킵으로 성능 최적화)
+                if (this.frameCount % 2 === 0) {
+                    this.updateVisibleItems();
+                }
+
+                // Transform 적용 (GPU 가속)
+                this.content.style.transform = `translate3d(0, ${-this.scrollY}px, 0)`;
+                
+                // 인디케이터 업데이트
+                this.updateIndicators();
+                
+                // FPS 계산
+                this.calculateFPS();
+                
+                this.lastTime = currentTime;
+                requestAnimationFrame(() => this.render());
+            }
+        }
+
+        // 초기화
+        document.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('scrollContainer');
+            new VirtualizedSmoothScroll(container, {
+                itemHeight: 100,
+                totalItems: 50000 // 5만개 아이템 시뮬레이션
+            });
+        });
+    </script>
+</body>
+</html>
